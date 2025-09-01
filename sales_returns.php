@@ -102,6 +102,21 @@ if($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='save'){
         ['account'=>'تكلفة البضاعة المباعة',   'debit'=>0,         'credit'=>$sum_cogs],
       ]);
       
+      // إضافة إشعار بإنشاء مردود مبيعات
+      require_once __DIR__ . '/notifications_lib.php';
+      $supplier_name = $pdo->query("SELECT name FROM suppliers WHERE id = $sid")->fetchColumn();
+      notify_event(
+        $pdo,
+        'sales_return_created',
+        "تم إنشاء مردود مبيعات #$hid",
+        "تم إنشاء مردود مبيعات جديد برقم #$hid\nالعميل/المورد: $supplier_name\nالمجموع: " . number_format($total, 2) . "\nالتاريخ: $d",
+        'info',
+        $_SESSION['user_id'] ?? null,
+        'sales_return_headers',
+        $hid,
+        true
+      );
+      
       $ok="تم حفظ مردود المبيعات #$hid وترحيل القيد وزيادة المخزون."; 
       $_POST=[];
     }catch(Throwable $e){ if($pdo->inTransaction())$pdo->rollBack(); $errors[]='فشل الحفظ: '.$e->getMessage(); }

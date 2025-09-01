@@ -65,6 +65,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'creat
     try {
       $st = $pdo->prepare("INSERT INTO products (sku,name,quantity,cost_price,sale_price) VALUES (?,?,?,?,?)");
       $st->execute([$sku !== '' ? $sku : null, $name, (int)$qty, (float)$cost, (float)$price]);
+      
+      // إرسال إشعار بإضافة منتج جديد
+      require_once __DIR__ . '/notifications_lib.php';
+      notify_event(
+        $pdo,
+        'product_created',
+        "إضافة صنف",
+        "تمت إضافة الصنف: {$name} (الكمية: {$qty})",
+        'info',
+        $_SESSION['user_id'] ?? null,
+        'products',
+        (int)$pdo->lastInsertId(),
+        true
+      );
+      
       $_SESSION['flash'] = ['type'=>'','msg'=>'تم إضافة المنتج بنجاح.'];
       header('Location: ./inventory.php'); exit;
     } catch (PDOException $e) {

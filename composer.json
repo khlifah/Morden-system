@@ -3,7 +3,8 @@
         "php": "^7.4 || ^8.0",
         "ext-pdo": "*",
         "ext-mysqli": "*",
-        "ext-json": "*"
+        "ext-json": "*",
+        "phpmailer/phpmailer": "^6.10"
     },
     "require-dev": {
         "heroku/heroku-buildpack-php": "*"

@@ -36,9 +36,30 @@ $editRow = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'delete') {
   $id = (int)($_POST['id'] ?? 0);
   if ($id > 0) {
-    $st = $pdo->prepare("DELETE FROM suppliers WHERE id = ?");
+    $st = $pdo->prepare("SELECT name FROM suppliers WHERE id = ?");
     $st->execute([$id]);
-    $_SESSION['flash'] = ['type'=>'','msg'=>'تم حذف المورد.'];
+    $supplier = $st->fetch();
+    
+    if ($supplier) {
+      $st = $pdo->prepare("DELETE FROM suppliers WHERE id = ?");
+      $st->execute([$id]);
+      
+      // إضافة إشعار الحذف
+      require_once __DIR__ . '/notifications_lib.php';
+      notify_event(
+        $pdo,
+        'supplier_deleted',
+        "حذف مورد",
+        "تم حذف المورد: {$supplier['name']}",
+        'warning',
+        $_SESSION['user_id'] ?? null,
+        'suppliers',
+        $id,
+        true
+      );
+      
+      $_SESSION['flash'] = ['type'=>'','msg'=>'تم حذف المورد.'];
+    }
   }
   header('Location: ./suppliers.php'); exit;
 }
@@ -56,6 +77,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'creat
   if (!$errors) {
     $st = $pdo->prepare("INSERT INTO suppliers (name,phone,address,opening_balance) VALUES (?,?,?,?)");
     $st->execute([$name, $phone !== '' ? $phone : null, $address !== '' ? $address : null, (float)$balance]);
+    $supplierId = $pdo->lastInsertId();
+    
+    // إضافة إشعار الإضافة
+    require_once __DIR__ . '/notifications_lib.php';
+    notify_event(
+      $pdo,
+      'supplier_created',
+      "إضافة مورد جديد",
+      "تمت إضافة مورد جديد: $name",
+      'success',
+      $_SESSION['user_id'] ?? null,
+      'suppliers',
+      $supplierId,
+      true
+    );
+    
     $_SESSION['flash'] = ['type'=>'','msg'=>'تم إضافة المورد بنجاح.'];
     header('Location: ./suppliers.php'); exit;
   }
@@ -91,8 +128,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
   if (!is_numeric($balance)) $errors[] = 'الرصيد الافتتاحي يجب أن يكون رقمًا.';
 
   if (!$errors) {
+    // الحصول على البيانات القديمة قبل التحديث
+    $st = $pdo->prepare("SELECT name FROM suppliers WHERE id = ?");
+    $st->execute([$id]);
+    $oldData = $st->fetch();
+    
+    // تنفيذ التحديث
     $st = $pdo->prepare("UPDATE suppliers SET name=?, phone=?, address=?, opening_balance=? WHERE id=?");
     $st->execute([$name, $phone !== '' ? $phone : null, $address !== '' ? $address : null, (float)$balance, $id]);
+    
+    // إضافة إشعار التعديل
+    require_once __DIR__ . '/notifications_lib.php';
+    $changes = [];
+    if ($oldData && $oldData['name'] !== $name) {
+      $changes[] = "الاسم: من {$oldData['name']} إلى $name";
+    }
+    
+    notify_event(
+      $pdo,
+      'supplier_updated',
+      "تحديث بيانات مورد",
+      "تم تحديث بيانات المورد: $name\n" . implode("\n", $changes),
+      'info',
+      $_SESSION['user_id'] ?? null,
+      'suppliers',
+      $id,
+      true
+    );
+    
     $_SESSION['flash'] = ['type'=>'','msg'=>'تم تعديل بيانات المورد.'];
     header('Location: ./suppliers.php'); exit;
   } else {

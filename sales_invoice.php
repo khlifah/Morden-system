@@ -1,20 +1,26 @@
 <?php
-// sales_invoice.php — فاتورة مبيعات (مرن مع اختلاف أعمدة الجداول)
+// sales_invoice.php — فاتورة مبيعات (مرن) + إشعار بريد/نظام
 require_once __DIR__ . '/auth.php';
 if (!function_exists('db')) require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/accounting.php';
+require_once __DIR__ . '/notifications_lib.php';
+
 $pdo = db();
 
-/* دوال مساعدة سريعة */
-function col_exists_fast(PDO $pdo, string $table, string $col): bool {
-  $st = $pdo->prepare("SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-                       WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1");
+/* دوال مساعدة */
+function col_exists_local(PDO $pdo, string $table, string $col): bool {
+  $st = $pdo->prepare("
+    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = ?
+      AND COLUMN_NAME = ?
+    LIMIT 1
+  ");
   $st->execute([$table, $col]);
   return (bool)$st->fetchColumn();
 }
 function table_cols(PDO $pdo, string $table): array {
-  $st = $pdo->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-                       WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?");
+  $st = $pdo->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?");
   $st->execute([$table]);
   return array_map(fn($r)=>$r['COLUMN_NAME'], $st->fetchAll(PDO::FETCH_ASSOC));
 }
@@ -36,17 +42,18 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS products(
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
-/* ترقية products لو ناقص أعمدة شائعة (محاولات آمنة) */
-try { if (!col_exists_fast($pdo,'products','quantity'))   $pdo->exec("ALTER TABLE products ADD COLUMN quantity INT NOT NULL DEFAULT 0"); } catch(Throwable $e){}
-try { if (!col_exists_fast($pdo,'products','cost_price'))  $pdo->exec("ALTER TABLE products ADD COLUMN cost_price DECIMAL(14,2) NOT NULL DEFAULT 0.00"); } catch(Throwable $e){}
-try { if (!col_exists_fast($pdo,'products','sale_price'))  $pdo->exec("ALTER TABLE products ADD COLUMN sale_price DECIMAL(14,2) NOT NULL DEFAULT 0.00"); } catch(Throwable $e){}
+/* ترقية products لو ناقص */
+try { if (!col_exists_local($pdo,'products','quantity'))   $pdo->exec("ALTER TABLE products ADD COLUMN quantity INT NOT NULL DEFAULT 0"); } catch(Throwable $e){}
+try { if (!col_exists_local($pdo,'products','cost_price'))  $pdo->exec("ALTER TABLE products ADD COLUMN cost_price DECIMAL(14,2) NOT NULL DEFAULT 0.00"); } catch(Throwable $e){}
+try { if (!col_exists_local($pdo,'products','sale_price'))  $pdo->exec("ALTER TABLE products ADD COLUMN sale_price DECIMAL(14,2) NOT NULL DEFAULT 0.00"); } catch(Throwable $e){}
 
-/* مبيعات: رأس + تفاصيل */
+/* جداول المبيعات */
 $pdo->exec("CREATE TABLE IF NOT EXISTS sales_invoices(
   id INT AUTO_INCREMENT PRIMARY KEY,
   invoice_date DATE NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
 $pdo->exec("CREATE TABLE IF NOT EXISTS sales_items(
   id INT AUTO_INCREMENT PRIMARY KEY,
   invoice_id INT NOT NULL,
@@ -58,28 +65,20 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS sales_items(
   FOREIGN KEY (invoice_id) REFERENCES sales_invoices(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
-/* إضافة أعمدة تاريخ الإصدار والانتهاء إن لم توجد */
-try { if (!col_exists_fast($pdo,'sales_items','issue_date')) $pdo->exec("ALTER TABLE sales_items ADD COLUMN issue_date DATE NULL AFTER line_total"); } catch(Throwable $e){}
-try { if (!col_exists_fast($pdo,'sales_items','expiry_date')) $pdo->exec("ALTER TABLE sales_items ADD COLUMN expiry_date DATE NULL AFTER issue_date"); } catch(Throwable $e){}
-
-/* ترقية sales_invoices لإضافة الأعمدة الناقصة */
-try { if (!col_exists_fast($pdo,'sales_invoices','customer_id')) $pdo->exec("ALTER TABLE sales_invoices ADD COLUMN customer_id INT NULL"); } catch(Throwable $e){}
-try { if (!col_exists_fast($pdo,'sales_invoices','note'))        $pdo->exec("ALTER TABLE sales_invoices ADD COLUMN note VARCHAR(255) NULL"); } catch(Throwable $e){}
-try { if (!col_exists_fast($pdo,'sales_invoices','total_amount')) $pdo->exec("ALTER TABLE sales_invoices ADD COLUMN total_amount DECIMAL(14,2) NOT NULL DEFAULT 0.00"); } catch(Throwable $e){}
-try { if (!col_exists_fast($pdo,'sales_invoices','reconciled'))   $pdo->exec("ALTER TABLE sales_invoices ADD COLUMN reconciled TINYINT(1) NOT NULL DEFAULT 0"); } catch(Throwable $e){}
+/* ترقية sales_invoices */
+try { if (!col_exists_local($pdo,'sales_invoices','customer_id'))  $pdo->exec("ALTER TABLE sales_invoices ADD COLUMN customer_id INT NULL"); } catch(Throwable $e){}
+try { if (!col_exists_local($pdo,'sales_invoices','note'))         $pdo->exec("ALTER TABLE sales_invoices ADD COLUMN note VARCHAR(255) NULL"); } catch(Throwable $e){}
+try { if (!col_exists_local($pdo,'sales_invoices','total_amount'))  $pdo->exec("ALTER TABLE sales_invoices ADD COLUMN total_amount DECIMAL(14,2) NOT NULL DEFAULT 0.00"); } catch(Throwable $e){}
+try { if (!col_exists_local($pdo,'sales_invoices','reconciled'))    $pdo->exec("ALTER TABLE sales_invoices ADD COLUMN reconciled TINYINT(1) NOT NULL DEFAULT 0"); } catch(Throwable $e){}
 
 /* بيانات الواجهة */
 $customers = $pdo->query("SELECT id,name FROM customers ORDER BY name")->fetchAll();
-
-/* قراءة المنتجات ديناميكيًا (لو عمود ناقص نعمل alias) */
-$qCol  = col_exists_fast($pdo,'products','quantity')   ? 'quantity'    : '0 AS quantity';
-$cCol  = col_exists_fast($pdo,'products','cost_price')  ? 'cost_price'  : '0.00 AS cost_price';
-$sCol  = col_exists_fast($pdo,'products','sale_price')  ? 'sale_price'  : '0.00 AS sale_price';
-
-$products = $pdo->query("
-  SELECT id,name,sku,$qCol,$cCol,$sCol
-  FROM products
-  ORDER BY name
+$products  = $pdo->query("
+  SELECT id,name,sku,
+         ".(col_exists_local($pdo,'products','quantity')?'quantity':'0 AS quantity').",
+         ".(col_exists_local($pdo,'products','cost_price')?'cost_price':'0.00 AS cost_price').",
+         ".(col_exists_local($pdo,'products','sale_price')?'sale_price':'0.00 AS sale_price')."
+  FROM products ORDER BY name
 ")->fetchAll();
 
 $errors=[]; $ok=null;
@@ -90,53 +89,53 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='save'){
   $cid  = (int)($_POST['customer_id'] ?? 0);
   $note = trim($_POST['note'] ?? '');
 
-  $pids   = $_POST['item_product_id'] ?? [];
-  $qtys   = $_POST['item_qty'] ?? [];
-  $prices = $_POST['item_price'] ?? [];
-  $issues = $_POST['item_issue_date'] ?? [];
-  $expiries = $_POST['item_expiry_date'] ?? [];
+  $pids    = $_POST['item_product_id'] ?? [];
+  $qtys    = $_POST['item_qty'] ?? [];
+  $prices  = $_POST['item_price'] ?? [];
+  $expiries= $_POST['item_expiry_date'] ?? [];
 
   $items=[]; $total=0; $cogs_total=0;
 
-  for($i=0;$i<count($pids);$i++){
+  for ($i=0; $i<count($pids); $i++){
     $pid = (int)($pids[$i] ?? 0);
     $q   = (int)($qtys[$i] ?? 0);
     $p   = (float)($prices[$i] ?? 0);
-
     if ($pid>0 && $q>0 && $p>=0){
-      // تحقق من المخزون + تكلفة الصنف
-      $st = $pdo->prepare("SELECT name,".(col_exists_fast($pdo,'products','quantity')?'quantity':'0 AS quantity').",".
-                                   (col_exists_fast($pdo,'products','cost_price')?'cost_price':'0.00 AS cost_price').
-                          " FROM products WHERE id=?");
+      // تحقق من المخزون والتكلفة
+      $st = $pdo->prepare("SELECT name,".
+          (col_exists_local($pdo,'products','quantity')?'quantity':'0 AS quantity').",".
+          (col_exists_local($pdo,'products','cost_price')?'cost_price':'0.00 AS cost_price').
+          " FROM products WHERE id=?");
       $st->execute([$pid]);
       $prod = $st->fetch();
       if (!$prod){ $errors[]="الصنف ($pid) غير موجود."; continue; }
-      if ((int)$prod['quantity'] < $q){
+      if (col_exists_local($pdo,'products','quantity') && (int)$prod['quantity'] < $q){
         $errors[] = 'المتوفر لا يكفي للصنف: '.$prod['name'].' (المتاح: '.$prod['quantity'].')';
         continue;
       }
-      $expiry_date = trim($_POST["item_{$i}_expiry_date"] ?? '');
+      $expiry = trim($expiries[$i] ?? '');
       $lt = round($q*$p,2);
-      $items[] = ['pid'=>$pid,'qty'=>$q,'price'=>$p,'line'=>$lt,'expiry_date'=>$expiry_date];
-      $total += $lt;
-      $cogs_total += round($q*(float)$prod['cost_price'],2);
+      $items[] = ['pid'=>$pid,'qty'=>$q,'price'=>$p,'line'=>$lt,'expiry_date'=>$expiry];
+      $total  += $lt;
+      $cogs_total += round($q*(float)$prod['cost_price'], 2);
     }
   }
 
-  if (!$items) $errors[]='أضف سطرًا واحدًا على الأقل.';
-  if ($total<=0) $errors[]='الإجمالي يجب أن يكون أكبر من صفر.';
+  if (!$items) $errors[] = 'أضف سطرًا واحدًا على الأقل.';
+  if ($total<=0) $errors[] = 'الإجمالي يجب أن يكون أكبر من صفر.';
 
   if (!$errors){
+    $inv_id = null;
     try{
-      $pdo->beginTransaction();
+      if (!$pdo->inTransaction()) $pdo->beginTransaction();
 
-      // إدراج رأس الفاتورة ديناميكيًا حسب الأعمدة المتاحة فعليًا
+      // رأس الفاتورة ديناميكي
       $avail = table_cols($pdo,'sales_invoices');
       $cols = ['invoice_date']; $vals = [$date];
-      if (in_array('customer_id',$avail,true)) { $cols[]='customer_id';  $vals[] = ($cid?:null); }
-      if (in_array('note',$avail,true))        { $cols[]='note';         $vals[] = ($note!==''?$note:null); }
-      if (in_array('total_amount',$avail,true)){ $cols[]='total_amount'; $vals[] = $total; }
-      if (in_array('reconciled',$avail,true))  { $cols[]='reconciled';   $vals[] = 0; }
+      if (in_array('customer_id',$avail,true))  { $cols[]='customer_id';  $vals[] = ($cid?:null); }
+      if (in_array('note',$avail,true))         { $cols[]='note';         $vals[] = ($note!==''?$note:null); }
+      if (in_array('total_amount',$avail,true)) { $cols[]='total_amount'; $vals[] = $total; }
+      if (in_array('reconciled',$avail,true))   { $cols[]='reconciled';   $vals[] = 0; }
 
       $ph = '(' . implode(',', array_fill(0,count($cols),'?')) . ')';
       $sqlH = "INSERT INTO sales_invoices(".implode(',',$cols).") VALUES $ph";
@@ -144,49 +143,73 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='save'){
       $stH->execute($vals);
       $inv_id = (int)$pdo->lastInsertId();
 
-      // تفاصيل + خصم المخزون (إن وُجد عمود quantity)
+      // تفاصيل + خصم المخزون
       $insI = $pdo->prepare("INSERT INTO sales_items(invoice_id,product_id,quantity,sale_price,line_total,expiry_date) VALUES (?,?,?,?,?,?)");
-      $updQ = col_exists_fast($pdo,'products','quantity')
-              ? $pdo->prepare("UPDATE products SET quantity=quantity-? WHERE id=?")
-              : null;
+      $updQ = col_exists_local($pdo,'products','quantity') ? $pdo->prepare("UPDATE products SET quantity=quantity-? WHERE id=?") : null;
 
-      foreach($items as $r){ $insI->execute([$inv_id,$r['pid'],$r['qty'],$r['price'],$r['line'],$r['expiry_date']]); if($updQ){ $updQ->execute([$r['qty'],$r['pid']]); } }
+      foreach ($items as $r){
+        $insI->execute([$inv_id,$r['pid'],$r['qty'],$r['price'],$r['line'],$r['expiry_date'] ?: null]);
+        if ($updQ) $updQ->execute([$r['qty'],$r['pid']]);
+      }
 
-      $pdo->commit();
+      if ($pdo->inTransaction()) $pdo->commit();
 
-      // قيد يومية: مدينون/مبيعات/تكلفة المبيعات/المخزون
-      $acc_ar = $cid>0 ? "مدينون - عميل #$cid" : "مبيعات نقدية معلقة";
-      post_journal($pdo, 'sales', $inv_id, $date, 'فاتورة مبيعات', [
-        ['account'=>$acc_ar,       'debit'=>$total,     'credit'=>0],
-        ['account'=>'المبيعات',    'debit'=>0,          'credit'=>$total],
-        ['account'=>'تكلفة المبيعات','debit'=>$cogs_total,'credit'=>0],
-        ['account'=>'المخزون',     'debit'=>0,          'credit'=>$cogs_total],
-      ]);
-      $ok = "تم حفظ فاتورة المبيعات #$inv_id وترحيل القيد".(col_exists_fast($pdo,'products','quantity')?" وتحديث المخزون.":".");
-      $_POST=[];
+      // نحاول ترحيل القيد المحاسبي بشكل منفصل لعدم إسقاط الفاتورة لو فشل القيد
+      $journalOk = true;
+      try {
+        $acc_ar = $cid>0 ? "مدينون - عميل #$cid" : "مبيعات نقدية معلقة";
+        post_journal($pdo, 'sales', $inv_id, $date, 'فاتورة مبيعات', [
+          ['account'=>$acc_ar,        'debit'=>$total,     'credit'=>0],
+          ['account'=>'المبيعات',     'debit'=>0,          'credit'=>$total],
+          ['account'=>'تكلفة المبيعات','debit'=>$cogs_total,'credit'=>0],
+          ['account'=>'المخزون',      'debit'=>0,          'credit'=>$cogs_total],
+        ]);
+      } catch (Throwable $je) {
+        $journalOk = false;
+        error_log('[sales_journal] '.$je->getMessage());
+        $errors[] = 'تم حفظ الفاتورة لكن فشل ترحيل القيد: '.$je->getMessage();
+      }
+
+      // إشعار نظام + بريد
+      if ($inv_id) {
+        notify_event(
+          $pdo,
+          'sale_created',
+          "فاتورة مبيعات #$inv_id",
+          "تم حفظ فاتورة مبيعات بقيمة: ".number_format($total,2)." ريال.".($journalOk?'':"\n(تنبيه: تعذّر ترحيل القيد المحاسبي)"),
+          $journalOk ? 'success' : 'warning',
+          $_SESSION['user_id'] ?? null,
+          'sales_invoices',
+          $inv_id,
+          true
+        );
+      }
+
+      $ok = $journalOk ? "تم حفظ فاتورة المبيعات #$inv_id بنجاح." : "تم حفظ فاتورة المبيعات #$inv_id (تنبيه: فشل ترحيل القيد).";
+      $_POST = [];
     }catch(Throwable $e){
-      if ($pdo->inTransaction()) { $pdo->rollBack(); }
-      $errors[]='فشل الحفظ: '.$e->getMessage();
+      if ($pdo->inTransaction()) $pdo->rollBack();
+      $errors[] = 'فشل الحفظ: '.$e->getMessage();
     }
   }
 }
 
-/* قائمة آخر الفواتير (تعامل مع غياب total_amount ديناميكيًا) */
+/* قائمة آخر الفواتير */
 $list = $pdo->query("
-  SELECT si.id,si.invoice_date,".(col_exists_fast($pdo,'sales_invoices','total_amount')?'si.total_amount':'0 AS total_amount').",
+  SELECT si.id,si.invoice_date,".(col_exists_local($pdo,'sales_invoices','total_amount')?'si.total_amount':'0 AS total_amount').",
          c.name customer
   FROM sales_invoices si
   LEFT JOIN customers c ON c.id=si.customer_id
   ORDER BY si.id DESC LIMIT 50
 ")->fetchAll();
 
-$title='فاتورة مبيعات';
+$title = 'فاتورة مبيعات';
 ?>
 <!doctype html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title><?= $title ?> - موردن</title>
+<title><?= htmlspecialchars($title,ENT_QUOTES,'UTF-8') ?> - موردن</title>
 <style>
 *{box-sizing:border-box}body{margin:0;font-family:Tahoma,Arial,sans-serif;background:#f5f8fc;color:#1f2937}
 .header{display:flex;justify-content:space-between;align-items:center;background:#0c2140;color:#fff;padding:12px 16px}
@@ -255,8 +278,8 @@ th{color:#6b7280}
             </tr>
           </tbody>
           <tfoot>
-            <tr><td colspan="8"><button type="button" class="btn" onclick="addRow()">+ إضافة سطر</button></td></tr>
-            <tr><td colspan="6" class="total">الإجمالي</td><td id="gt" class="total">0.00</td><td></td></tr>
+            <tr><td colspan="7"><button type="button" class="btn" onclick="addRow()">+ إضافة سطر</button></td></tr>
+            <tr><td colspan="5" class="total">الإجمالي</td><td id="gt" class="total">0.00</td><td></td></tr>
           </tfoot>
         </table>
 
@@ -273,10 +296,10 @@ th{color:#6b7280}
             <tr><td colspan="4">لا يوجد</td></tr>
           <?php else: foreach($list as $r): ?>
             <tr>
-              <td><?= $r['id'] ?></td>
-              <td><?= $r['invoice_date'] ?></td>
+              <td><?= (int)$r['id'] ?></td>
+              <td><?= htmlspecialchars($r['invoice_date'],ENT_QUOTES,'UTF-8') ?></td>
               <td><?= htmlspecialchars($r['customer']??'',ENT_QUOTES,'UTF-8') ?></td>
-              <td><?= number_format($r['total_amount'],2) ?></td>
+              <td><?= number_format((float)$r['total_amount'],2) ?></td>
             </tr>
           <?php endforeach; endif; ?>
         </tbody>
